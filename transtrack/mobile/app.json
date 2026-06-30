@@ -1,0 +1,35 @@
+{
+  "expo": {
+    "name": "TransTrack",
+    "slug": "transtrack",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "scheme": "transtrack",
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.transtrack.app",
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "Drivers need location access so the fleet and parents can see the bus's live position during a trip.",
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "Drivers need background location access so trip tracking continues if the app isn't in the foreground.",
+        "UIBackgroundModes": ["location"]
+      }
+    },
+    "android": {
+      "package": "com.transtrack.app",
+      "permissions": [
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_BACKGROUND_LOCATION",
+        "FOREGROUND_SERVICE"
+      ]
+    },
+    "plugins": [
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "Allow TransTrack to use your location so the fleet and parents can see your bus's live position during a trip."
+        }
+      ]
+    ]
+  }
+}
