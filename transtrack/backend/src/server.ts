@@ -20,7 +20,22 @@ async function main() {
 
   const app = express();
   app.use(helmet());
-  app.use(cors({ origin: config.corsOrigins, credentials: true }));
+
+  // The `cors` library silently refuses to allow requests when origin is
+  // the literal string '*' combined with credentials: true (browsers
+  // disallow that combination for security reasons). To actually support
+  // a wildcard during early testing, we reflect whatever origin the
+  // request came from instead of passing '*' through directly. Once a
+  // real domain is in place, set CORS_ORIGINS to that exact domain
+  // instead of '*' for tighter security.
+  const allowAllOrigins = config.corsOrigins.length === 1 && config.corsOrigins[0] === '*';
+  app.use(
+    cors({
+      origin: allowAllOrigins ? true : config.corsOrigins,
+      credentials: true,
+    })
+  );
+
   app.use(express.json());
 
   app.get('/health', (_req, res) => res.json({ ok: true, env: config.env }));
