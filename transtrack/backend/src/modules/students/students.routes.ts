@@ -103,3 +103,42 @@ studentsRouter.post('/parents', requireRole('ADMIN', 'DISPATCHER'), asyncHandler
   );
   res.status(201).json({ parent });
 }));
+
+const updateStudentSchema = z.object({
+  fullName: z.string().min(1).optional(),
+  grade: z.string().optional(),
+  routeId: z.string().uuid().nullable().optional(),
+});
+
+studentsRouter.patch('/:id', requireRole('ADMIN', 'DISPATCHER'), asyncHandler(async (req, res) => {
+  const body = updateStudentSchema.parse(req.body);
+
+  const student = await queryOne(
+    `UPDATE students SET
+       full_name = COALESCE($1, full_name),
+       grade = COALESCE($2, grade),
+       route_id = CASE WHEN $3::boolean THEN $4::uuid ELSE route_id END
+     WHERE id = $5 AND organization_id = $6
+     RETURNING id, full_name, grade, route_id, stop_id`,
+    [
+      body.fullName ?? null,
+      body.grade ?? null,
+      'routeId' in body,        // only update route_id if key was explicitly sent
+      body.routeId ?? null,
+      req.params.id,
+      req.auth!.organizationId,
+    ]
+  );
+  if (!student) throw new ApiError(404, 'Student not found');
+  res.json({ student });
+}));
+
+studentsRouter.delete('/:id', requireRole('ADMIN', 'DISPATCHER'), asyncHandler(async (req, res) => {
+  const student = await queryOne(
+    'SELECT id FROM students WHERE id = $1 AND organization_id = $2',
+    [req.params.id, req.auth!.organizationId]
+  );
+  if (!student) throw new ApiError(404, 'Student not found');
+  await query('DELETE FROM students WHERE id = $1', [req.params.id]);
+  res.json({ ok: true });
+}));
