@@ -98,3 +98,51 @@ routesRouter.post('/:id/stops', requireRole('ADMIN', 'DISPATCHER'), asyncHandler
   );
   res.status(201).json({ stop });
 }));
+
+const updateRouteSchema = z.object({
+  name: z.string().min(1).optional(),
+  description: z.string().optional(),
+});
+
+routesRouter.patch('/:id', requireRole('ADMIN', 'DISPATCHER'), asyncHandler(async (req, res) => {
+  const body = updateRouteSchema.parse(req.body);
+  const route = await queryOne(
+    `UPDATE routes SET
+       name = COALESCE($1, name),
+       description = COALESCE($2, description)
+     WHERE id = $3 AND organization_id = $4
+     RETURNING id, name, description`,
+    [body.name ?? null, body.description ?? null, req.params.id, req.auth!.organizationId]
+  );
+  if (!route) throw new ApiError(404, 'Route not found');
+  res.json({ route });
+}));
+
+/**
+ * Deletes a route and all its stops (cascades via FK). Also nulls out any
+ * students whose stop_id or route_id pointed at this route — safer than
+ * blocking the delete because a student was linked.
+ */
+routesRouter.delete('/:id', requireRole('ADMIN', 'DISPATCHER'), asyncHandler(async (req, res) => {
+  const route = await queryOne(
+    'SELECT id FROM routes WHERE id = $1 AND organization_id = $2',
+    [req.params.id, req.auth!.organizationId]
+  );
+  if (!route) throw new ApiError(404, 'Route not found');
+
+  // Unlink students before deleting — ON DELETE SET NULL in schema handles
+  // stop_id already, but route_id also needs clearing.
+  await query(`UPDATE students SET route_id = NULL WHERE route_id = $1`, [req.params.id]);
+  await query(`DELETE FROM routes WHERE id = $1`, [req.params.id]);
+  res.json({ ok: true });
+}));
+
+routesRouter.delete('/:routeId/stops/:stopId', requireRole('ADMIN', 'DISPATCHER'), asyncHandler(async (req, res) => {
+  const route = await queryOne(
+    'SELECT id FROM routes WHERE id = $1 AND organization_id = $2',
+    [req.params.routeId, req.auth!.organizationId]
+  );
+  if (!route) throw new ApiError(404, 'Route not found');
+  await query(`DELETE FROM stops WHERE id = $1 AND route_id = $2`, [req.params.stopId, req.params.routeId]);
+  res.json({ ok: true });
+}));
