@@ -1,6 +1,4 @@
 import { useState, useRef, useEffect } from 'react';
-import { api } from '@/lib/api';
-import { RouteSummary } from '@/types';
 
 declare global {
   interface Window { XLSX: any; }
@@ -9,344 +7,331 @@ declare global {
 interface ParsedRow {
   name: string;
   phone: string;
-  location?: string;
   boardingPoint?: string;
 }
 
+interface RouteOption {
+  id: string;
+  name: string;
+}
+
 function findCol(headers: string[], keywords: string[]): number {
-  return headers.findIndex((h) =>
-    keywords.some((kw) => h?.toLowerCase().includes(kw.toLowerCase()))
+  return headers.findIndex((h: string) =>
+    keywords.some((kw) => String(h ?? '').toLowerCase().includes(kw.toLowerCase()))
   );
 }
 
-function parseWorksheet(worksheet: any, XLSX: any): ParsedRow[] {
-  const json: any[] = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: '' });
+function parseSheet(worksheet: any): ParsedRow[] {
+  if (!window.XLSX) return [];
+  const json: any[][] = window.XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: '' });
   if (json.length < 2) return [];
 
-  // Find header row — the row containing "name"
   let headerIdx = 0;
   for (let i = 0; i < Math.min(6, json.length); i++) {
-    if (json[i].some((c: any) => /name/i.test(String(c)))) {
-      headerIdx = i;
-      break;
-    }
+    if (json[i].some((c: any) => /name/i.test(String(c)))) { headerIdx = i; break; }
   }
 
   const headers = json[headerIdx].map((c: any) => String(c ?? ''));
-  const nameCol   = findCol(headers, ['name', 'student']);
-  const phoneCol  = findCol(headers, ['contact', 'phone', 'mobile', 'number']);
-  const locCol    = findCol(headers, ['location', 'area', 'place']);
-  const boardCol  = findCol(headers, ['boarding', 'stop', 'point']);
+  const nameCol  = findCol(headers, ['name', 'student']);
+  const phoneCol = findCol(headers, ['contact', 'phone', 'mobile', 'number']);
+  const boardCol = findCol(headers, ['boarding', 'stop', 'point', 'location']);
 
   const rows: ParsedRow[] = [];
   for (let i = headerIdx + 1; i < json.length; i++) {
     const row = json[i];
-    const name  = String(nameCol  >= 0 ? row[nameCol]  ?? '' : '').trim();
-    const phone = String(phoneCol >= 0 ? row[phoneCol] ?? '' : '').trim();
+    const name  = String(nameCol  >= 0 ? (row[nameCol]  ?? '') : '').trim();
+    const phone = String(phoneCol >= 0 ? (row[phoneCol] ?? '') : '').trim();
     if (!name && !phone) continue;
     rows.push({
       name,
       phone,
-      location:     locCol   >= 0 ? String(row[locCol]   ?? '').trim() : undefined,
       boardingPoint: boardCol >= 0 ? String(row[boardCol] ?? '').trim() : undefined,
     });
   }
   return rows;
 }
 
-// ─────────────────────────────────────────────────────────────────
-// Steps
-// ─────────────────────────────────────────────────────────────────
-type Step = 'upload' | 'map' | 'preview' | 'done';
-
 export function ImportPage() {
-  const [step, setStep]       = useState<Step>('upload');
-  const [routes, setRoutes]   = useState<RouteSummary[]>([]);
-  const [xlsxReady, setXlsxReady] = useState(false);
-
-  // Per-file state
+  const [ready, setReady]         = useState(false);
+  const [routes, setRoutes]       = useState<RouteOption[]>([]);
+  const [step, setStep]           = useState<'upload'|'assign'|'done'>('upload');
   const [fileName, setFileName]   = useState('');
-  const [sheets, setSheets]       = useState<{ name: string; rows: ParsedRow[] }[]>([]);
-  const [mapping, setMapping]     = useState<Record<string, string>>({}); // sheetName → routeId
-  const [result, setResult]       = useState<string[]>([]);
-  const [importing, setImporting] = useState(false);
-  const [error, setError]         = useState<string | null>(null);
+  const [sheetNames, setSheetNames] = useState<string[]>([]);
+  const [allRows, setAllRows]     = useState<Record<string, ParsedRow[]>>({});
+  const [mapping, setMapping]     = useState<Record<string, string>>({});
+  const [results, setResults]     = useState<string[]>([]);
+  const [busy, setBusy]           = useState(false);
+  const [error, setError]         = useState('');
   const fileRef = useRef<HTMLInputElement>(null);
 
+  // Load SheetJS + routes
   useEffect(() => {
-    api.get<{ routes: RouteSummary[] }>('/routes').then((d) => setRoutes(d.routes));
-    if (window.XLSX) { setXlsxReady(true); return; }
+    // Load routes
+    const tokens = localStorage.getItem('transtrack_tokens');
+    if (tokens) {
+      const { accessToken } = JSON.parse(tokens);
+      fetch('/api/routes', { headers: { Authorization: `Bearer ${accessToken}` } })
+        .catch(() => {});
+      // Use relative path fallback — direct fetch to backend
+      const backendUrl = (window as any).__VITE_API || 'https://transtrack-backend.onrender.com';
+      fetch(`${backendUrl}/routes`, { headers: { Authorization: `Bearer ${accessToken}` } })
+        .then((r) => r.json())
+        .then((d) => { if (d.routes) setRoutes(d.routes); })
+        .catch(() => {});
+    }
+
+    // Load SheetJS
+    if (window.XLSX) { setReady(true); return; }
     const s = document.createElement('script');
     s.src = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
-    s.onload = () => setXlsxReady(true);
+    s.onload = () => setReady(true);
+    s.onerror = () => setError('Could not load Excel reader. Check your internet connection.');
     document.head.appendChild(s);
   }, []);
 
-  // ── Step 1: Upload ─────────────────────────────────────────────
   function handleFile(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
-    if (!file || !window.XLSX) return;
+    if (!file) return;
+    if (!window.XLSX) { setError('Excel reader not loaded yet. Please wait a moment and try again.'); return; }
+    setError('');
     setFileName(file.name);
-    setError(null);
-    setResult([]);
 
     const reader = new FileReader();
+    reader.onerror = () => setError('Could not read this file.');
     reader.onload = (evt) => {
       try {
         const wb = window.XLSX.read(evt.target?.result, { type: 'binary' });
-        const parsed = wb.SheetNames.map((name: string) => ({
-          name,
-          rows: parseWorksheet(wb.Sheets[name], window.XLSX),
-        })).filter((s: any) => s.rows.length > 0);
+        const names: string[] = wb.SheetNames;
+        const rows: Record<string, ParsedRow[]> = {};
+        names.forEach((n: string) => { rows[n] = parseSheet(wb.Sheets[n]); });
 
-        if (parsed.length === 0) {
-          setError('No student data found in this file. Make sure it has columns for Name and Contact/Phone.');
+        const nonEmpty = names.filter((n) => rows[n].length > 0);
+        if (nonEmpty.length === 0) {
+          setError('No student data found. Make sure your Excel has columns for Name and Contact/Phone.');
           return;
         }
-        setSheets(parsed);
-        // Auto-map if only one sheet
-        if (parsed.length === 1) {
-          setMapping({ [parsed[0].name]: '' });
-        } else {
-          const m: Record<string, string> = {};
-          parsed.forEach((s: any) => { m[s.name] = ''; });
-          setMapping(m);
-        }
-        setStep('map');
+
+        setSheetNames(nonEmpty);
+        setAllRows(rows);
+        const m: Record<string, string> = {};
+        nonEmpty.forEach((n) => { m[n] = ''; });
+        setMapping(m);
+        setStep('assign');
       } catch {
-        setError('Could not read this file. Make sure it is a valid .xlsx or .xls file.');
+        setError('Could not parse this Excel file. Make sure it is a valid .xlsx or .xls file.');
       }
     };
     reader.readAsBinaryString(file);
   }
 
-  // ── Step 2: Map sheets → routes ────────────────────────────────
-  const allMapped = sheets.every((s) => mapping[s.name]);
-
-  // ── Step 3: Import ─────────────────────────────────────────────
   async function handleImport() {
-    setImporting(true);
-    setError(null);
+    const toImport = sheetNames.filter((n) => mapping[n]);
+    if (toImport.length === 0) { setError('Please assign at least one sheet to a route.'); return; }
+
+    setBusy(true);
+    setError('');
+    const tokens = localStorage.getItem('transtrack_tokens');
+    if (!tokens) { setError('Not logged in. Please refresh and log in again.'); setBusy(false); return; }
+    const { accessToken } = JSON.parse(tokens);
+    const backendUrl = 'https://transtrack-backend.onrender.com';
     const newResults: string[] = [];
 
-    for (const sheet of sheets) {
-      const routeId = mapping[sheet.name];
-      if (!routeId) continue;
+    for (const sheetName of toImport) {
+      const routeId = mapping[sheetName];
       const routeName = routes.find((r) => r.id === routeId)?.name ?? routeId;
       try {
-        const data = await api.post<{ message: string }>('/import/students', {
-          routeId,
-          rows: sheet.rows,
+        const res = await fetch(`${backendUrl}/import/students`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
+          body: JSON.stringify({ routeId, rows: allRows[sheetName] }),
         });
-        newResults.push(`✓ "${sheet.name}" → ${routeName}: ${data.message}`);
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error ?? 'Import failed');
+        newResults.push(`✓ "${sheetName}" → ${routeName}: ${data.message}`);
       } catch (err) {
-        newResults.push(`✗ "${sheet.name}": ${err instanceof Error ? err.message : 'Import failed'}`);
+        newResults.push(`✗ "${sheetName}": ${err instanceof Error ? err.message : 'Failed'}`);
       }
     }
 
-    setResult(newResults);
-    setImporting(false);
+    setResults(newResults);
+    setBusy(false);
     setStep('done');
   }
 
   function reset() {
     setStep('upload');
-    setSheets([]);
-    setMapping({});
-    setResult([]);
     setFileName('');
-    setError(null);
+    setSheetNames([]);
+    setAllRows({});
+    setMapping({});
+    setResults([]);
+    setError('');
     if (fileRef.current) fileRef.current.value = '';
   }
 
-  const totalStudents = sheets
-    .filter((s) => mapping[s.name])
-    .reduce((sum, s) => sum + s.rows.length, 0);
+  const totalStudents = sheetNames.filter((n) => mapping[n]).reduce((s, n) => s + allRows[n].length, 0);
 
   return (
-    <div className="p-8 max-w-3xl">
-      {/* Header */}
-      <div className="mb-8">
-        <h1 className="text-xl font-semibold text-ink">Import Students from Excel</h1>
-        <p className="text-sm text-muted mt-1">
-          Upload your Excel file, assign it to a route, and all students and parent accounts are created automatically.
-        </p>
-      </div>
+    <div style={{ padding: '32px', maxWidth: '800px', fontFamily: 'Inter, system-ui, sans-serif' }}>
+      <h1 style={{ fontSize: '20px', fontWeight: 700, color: '#0B1220', marginBottom: '4px' }}>
+        Import Students from Excel
+      </h1>
+      <p style={{ fontSize: '14px', color: '#64748B', marginBottom: '32px' }}>
+        Upload your Excel file, assign it to a route, and all students and parent accounts are created automatically.
+      </p>
 
-      {/* Progress indicator */}
-      <div className="flex items-center gap-2 mb-8">
-        {(['upload', 'map', 'preview', 'done'] as Step[]).map((s, i) => {
-          const labels: Record<Step, string> = { upload: '1. Upload', map: '2. Assign Route', preview: '3. Preview', done: '4. Done' };
-          const active = step === s;
-          const past = ['upload','map','preview','done'].indexOf(step) > i;
-          return (
-            <div key={s} className="flex items-center gap-2">
-              <div className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-colors ${
-                active ? 'bg-ink text-white' : past ? 'bg-active/10 text-active' : 'bg-slate-100 text-muted'
-              }`}>
-                {past ? '✓ ' : ''}{labels[s]}
-              </div>
-              {i < 3 && <div className="w-6 h-px bg-slate-200" />}
-            </div>
-          );
-        })}
-      </div>
-
-      {error && (
-        <div className="bg-red-50 border border-red-100 rounded-xl px-4 py-3 mb-6 flex justify-between">
-          <p className="text-sm text-alert">{error}</p>
-          <button onClick={() => setError(null)} className="text-muted text-xs ml-4 hover:text-ink">✕</button>
+      {!ready && (
+        <div style={{ background: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: '12px', padding: '16px', marginBottom: '20px', color: '#64748B', fontSize: '14px' }}>
+          Loading Excel reader…
         </div>
       )}
 
-      {/* ── STEP 1: Upload ── */}
+      {error && (
+        <div style={{ background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: '12px', padding: '12px 16px', marginBottom: '20px', color: '#DC2626', fontSize: '14px', display: 'flex', justifyContent: 'space-between' }}>
+          <span>{error}</span>
+          <button onClick={() => setError('')} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94A3B8', fontSize: '16px' }}>✕</button>
+        </div>
+      )}
+
+      {/* STEP 1: Upload */}
       {step === 'upload' && (
         <div
-          onClick={() => xlsxReady && fileRef.current?.click()}
-          className={`border-2 border-dashed rounded-2xl p-16 text-center transition-colors ${
-            xlsxReady
-              ? 'border-slate-200 hover:border-route hover:bg-route/5 cursor-pointer'
-              : 'border-slate-100 opacity-60'
-          }`}
+          onClick={() => ready && fileRef.current?.click()}
+          style={{
+            border: '2px dashed #CBD5E1', borderRadius: '16px', padding: '64px 32px',
+            textAlign: 'center', cursor: ready ? 'pointer' : 'default',
+            background: ready ? 'white' : '#F8FAFC',
+            transition: 'all 0.2s',
+          }}
+          onMouseEnter={(e) => { if (ready) (e.currentTarget as HTMLDivElement).style.borderColor = '#2563EB'; }}
+          onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.borderColor = '#CBD5E1'; }}
         >
-          <input ref={fileRef} type="file" accept=".xlsx,.xls" onChange={handleFile} className="hidden" />
-          <div className="text-4xl mb-4">📊</div>
-          <p className="font-semibold text-ink text-lg mb-1">
-            {xlsxReady ? 'Click to upload your Excel file' : 'Loading Excel reader…'}
+          <input ref={fileRef} type="file" accept=".xlsx,.xls" onChange={handleFile} style={{ display: 'none' }} />
+          <div style={{ fontSize: '48px', marginBottom: '16px' }}>📊</div>
+          <p style={{ fontSize: '16px', fontWeight: 600, color: '#0B1220', marginBottom: '8px' }}>
+            {ready ? 'Click to upload your Excel file' : 'Please wait…'}
           </p>
-          <p className="text-sm text-muted">Supports .xlsx and .xls — one or multiple sheets</p>
-          <div className="mt-6 text-xs text-muted bg-slate-50 rounded-xl p-4 text-left max-w-sm mx-auto">
-            <p className="font-medium text-ink mb-2">Expected columns in your Excel:</p>
-            <p>• <strong>Name</strong> — student's full name</p>
-            <p>• <strong>Contact / Phone</strong> — parent's mobile number</p>
-            <p>• <strong>Location / Boarding point</strong> — optional</p>
+          <p style={{ fontSize: '13px', color: '#94A3B8' }}>Supports .xlsx and .xls</p>
+
+          <div style={{ marginTop: '24px', background: '#F8FAFC', borderRadius: '12px', padding: '16px', textAlign: 'left', display: 'inline-block', minWidth: '280px' }}>
+            <p style={{ fontSize: '12px', fontWeight: 600, color: '#0B1220', marginBottom: '8px' }}>Expected columns in your Excel:</p>
+            <p style={{ fontSize: '12px', color: '#64748B', marginBottom: '4px' }}>• <strong>Name</strong> — student's full name</p>
+            <p style={{ fontSize: '12px', color: '#64748B', marginBottom: '4px' }}>• <strong>Contact / Phone</strong> — parent's mobile number</p>
+            <p style={{ fontSize: '12px', color: '#64748B' }}>• <strong>Boarding point / Location</strong> — optional</p>
           </div>
         </div>
       )}
 
-      {/* ── STEP 2: Assign routes ── */}
-      {step === 'map' && (
-        <div className="space-y-6">
-          <div className="bg-white rounded-2xl border border-slate-200 p-6">
-            <div className="flex items-center justify-between mb-1">
-              <p className="font-semibold text-ink">📄 {fileName}</p>
-              <button onClick={reset} className="text-xs text-muted hover:text-ink underline">
+      {/* STEP 2: Assign routes */}
+      {step === 'assign' && (
+        <div>
+          <div style={{ background: 'white', border: '1px solid #E2E8F0', borderRadius: '16px', padding: '24px', marginBottom: '16px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
+              <div>
+                <p style={{ fontWeight: 600, color: '#0B1220', fontSize: '15px' }}>📄 {fileName}</p>
+                <p style={{ fontSize: '13px', color: '#64748B', marginTop: '2px' }}>
+                  {sheetNames.length === 1
+                    ? `${allRows[sheetNames[0]]?.length ?? 0} students found`
+                    : `${sheetNames.length} sheets — assign each to a route`}
+                </p>
+              </div>
+              <button onClick={reset} style={{ background: 'none', border: '1px solid #E2E8F0', borderRadius: '8px', padding: '6px 12px', cursor: 'pointer', fontSize: '13px', color: '#64748B' }}>
                 Change file
               </button>
             </div>
-            <p className="text-sm text-muted mb-6">
-              {sheets.length === 1
-                ? `${sheets[0].rows.length} students found`
-                : `${sheets.length} sheets found — assign each to a route`}
-            </p>
 
-            <div className="space-y-4">
-              {sheets.map((sheet) => (
-                <div key={sheet.name} className="rounded-xl border border-slate-100 p-4">
-                  <div className="flex items-start gap-4">
-                    <div className="flex-1">
-                      <p className="font-medium text-ink">{sheet.name}</p>
-                      <p className="text-xs text-muted mt-0.5 mb-3">{sheet.rows.length} students</p>
-                      {/* Name preview chips */}
-                      <div className="flex flex-wrap gap-1.5">
-                        {sheet.rows.slice(0, 5).map((r, i) => (
-                          <span key={i} className="text-xs bg-slate-100 text-muted px-2.5 py-1 rounded-full">
-                            {r.name || '(no name)'}
-                          </span>
-                        ))}
-                        {sheet.rows.length > 5 && (
-                          <span className="text-xs text-muted px-1 py-1">
-                            +{sheet.rows.length - 5} more
-                          </span>
-                        )}
-                      </div>
-                    </div>
-
-                    {/* Route selector */}
-                    <div className="w-56 flex-shrink-0">
-                      <label className="block text-xs font-medium text-muted mb-1.5">
-                        Which route?
-                      </label>
-                      <select
-                        value={mapping[sheet.name] ?? ''}
-                        onChange={(e) => setMapping((prev) => ({ ...prev, [sheet.name]: e.target.value }))}
-                        className={`w-full px-3 py-2.5 rounded-xl border text-sm focus:outline-none focus:ring-2 focus:ring-route transition-colors ${
-                          mapping[sheet.name]
-                            ? 'border-active bg-active/5 text-ink'
-                            : 'border-slate-200 text-muted'
-                        }`}
-                      >
-                        <option value="">— Select a route —</option>
-                        {routes.map((r) => (
-                          <option key={r.id} value={r.id}>{r.name}</option>
-                        ))}
-                      </select>
-                      {mapping[sheet.name] && (
-                        <p className="text-xs text-active mt-1 font-medium">✓ Route assigned</p>
+            {sheetNames.map((sheetName) => (
+              <div key={sheetName} style={{ border: '1px solid #F1F5F9', borderRadius: '12px', padding: '16px', marginBottom: '12px' }}>
+                <div style={{ display: 'flex', gap: '16px', alignItems: 'flex-start' }}>
+                  <div style={{ flex: 1 }}>
+                    <p style={{ fontWeight: 600, color: '#0B1220', marginBottom: '4px' }}>{sheetName}</p>
+                    <p style={{ fontSize: '12px', color: '#64748B', marginBottom: '10px' }}>{allRows[sheetName]?.length ?? 0} students</p>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                      {(allRows[sheetName] ?? []).slice(0, 5).map((r, i) => (
+                        <span key={i} style={{ fontSize: '11px', background: '#F1F5F9', color: '#64748B', padding: '3px 10px', borderRadius: '999px' }}>
+                          {r.name || '(no name)'}
+                        </span>
+                      ))}
+                      {(allRows[sheetName]?.length ?? 0) > 5 && (
+                        <span style={{ fontSize: '11px', color: '#94A3B8', padding: '3px 4px' }}>
+                          +{(allRows[sheetName]?.length ?? 0) - 5} more
+                        </span>
                       )}
                     </div>
                   </div>
+
+                  <div style={{ width: '220px', flexShrink: 0 }}>
+                    <label style={{ display: 'block', fontSize: '12px', fontWeight: 600, color: '#64748B', marginBottom: '6px' }}>
+                      Which route?
+                    </label>
+                    <select
+                      value={mapping[sheetName] ?? ''}
+                      onChange={(e) => setMapping((prev) => ({ ...prev, [sheetName]: e.target.value }))}
+                      style={{
+                        width: '100%', padding: '10px 12px', borderRadius: '10px', fontSize: '13px',
+                        border: mapping[sheetName] ? '1px solid #16A34A' : '1px solid #CBD5E1',
+                        background: mapping[sheetName] ? '#F0FDF4' : 'white',
+                        color: '#0B1220', outline: 'none', cursor: 'pointer',
+                      }}
+                    >
+                      <option value="">— Select a route —</option>
+                      {routes.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
+                    </select>
+                    {mapping[sheetName] && (
+                      <p style={{ fontSize: '11px', color: '#16A34A', marginTop: '4px', fontWeight: 600 }}>✓ Route assigned</p>
+                    )}
+                  </div>
                 </div>
-              ))}
-            </div>
-          </div>
-
-          {/* Summary + action */}
-          <div className="flex items-center justify-between bg-white rounded-2xl border border-slate-200 px-6 py-4">
-            <div>
-              {allMapped ? (
-                <p className="text-sm font-medium text-ink">
-                  Ready to import <span className="text-route">{totalStudents} students</span>
-                </p>
-              ) : (
-                <p className="text-sm text-muted">Assign all sheets to a route to continue</p>
-              )}
-            </div>
-            <button
-              onClick={handleImport}
-              disabled={!allMapped || importing}
-              className="px-6 py-2.5 bg-ink text-white text-sm font-medium rounded-xl hover:bg-ink/90 transition-colors disabled:opacity-40"
-            >
-              {importing ? 'Importing…' : `Import ${totalStudents} students`}
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* ── STEP 4: Done ── */}
-      {step === 'done' && (
-        <div className="space-y-4">
-          <div className="bg-white rounded-2xl border border-slate-200 p-6">
-            <h2 className="font-semibold text-ink mb-4">Import complete</h2>
-            {result.map((r, i) => (
-              <div key={i} className={`flex items-start gap-3 py-3 border-b border-slate-50 last:border-0 ${r.startsWith('✓') ? '' : 'opacity-80'}`}>
-                <span className={`text-lg ${r.startsWith('✓') ? 'text-active' : 'text-alert'}`}>
-                  {r.startsWith('✓') ? '✓' : '✗'}
-                </span>
-                <p className="text-sm text-ink">{r.slice(2)}</p>
               </div>
             ))}
           </div>
 
-          <div className="bg-active/5 border border-active/20 rounded-2xl p-5">
-            <p className="text-sm font-medium text-active mb-1">Parents can now log in</p>
-            <p className="text-sm text-slate-600">
-              Each parent's mobile number is their login on the TransTrack mobile app —
-              no password, no email, just their number.
+          <div style={{ background: 'white', border: '1px solid #E2E8F0', borderRadius: '16px', padding: '16px 24px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <p style={{ fontSize: '14px', color: totalStudents > 0 ? '#0B1220' : '#94A3B8' }}>
+              {totalStudents > 0
+                ? <>Ready to import <strong style={{ color: '#2563EB' }}>{totalStudents} students</strong></>
+                : 'Assign sheets to routes to continue'}
+            </p>
+            <button
+              onClick={handleImport}
+              disabled={totalStudents === 0 || busy}
+              style={{
+                padding: '10px 24px', borderRadius: '10px', border: 'none', cursor: totalStudents > 0 && !busy ? 'pointer' : 'not-allowed',
+                background: totalStudents > 0 && !busy ? '#0B1220' : '#CBD5E1',
+                color: 'white', fontSize: '14px', fontWeight: 600,
+              }}
+            >
+              {busy ? 'Importing…' : `Import ${totalStudents} students`}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* STEP 3: Done */}
+      {step === 'done' && (
+        <div>
+          <div style={{ background: 'white', border: '1px solid #E2E8F0', borderRadius: '16px', padding: '24px', marginBottom: '16px' }}>
+            <h2 style={{ fontSize: '16px', fontWeight: 700, color: '#0B1220', marginBottom: '16px' }}>Import complete</h2>
+            {results.map((r, i) => (
+              <div key={i} style={{ display: 'flex', gap: '12px', padding: '12px 0', borderBottom: i < results.length - 1 ? '1px solid #F1F5F9' : 'none' }}>
+                <span style={{ fontSize: '18px' }}>{r.startsWith('✓') ? '✅' : '❌'}</span>
+                <p style={{ fontSize: '13px', color: '#0B1220' }}>{r.slice(2)}</p>
+              </div>
+            ))}
+          </div>
+
+          <div style={{ background: '#F0FDF4', border: '1px solid #BBF7D0', borderRadius: '16px', padding: '16px 20px', marginBottom: '16px' }}>
+            <p style={{ fontSize: '14px', fontWeight: 600, color: '#16A34A', marginBottom: '4px' }}>Parents can now log in</p>
+            <p style={{ fontSize: '13px', color: '#166534' }}>
+              Each parent just opens the TransTrack mobile app and types their mobile number — no password needed.
             </p>
           </div>
 
-          <div className="flex gap-3">
-            <button
-              onClick={reset}
-              className="px-5 py-2.5 bg-ink text-white text-sm font-medium rounded-xl hover:bg-ink/90 transition-colors"
-            >
+          <div style={{ display: 'flex', gap: '12px' }}>
+            <button onClick={reset} style={{ padding: '10px 20px', background: '#0B1220', color: 'white', border: 'none', borderRadius: '10px', cursor: 'pointer', fontSize: '14px', fontWeight: 600 }}>
               Import another file
             </button>
-            <a
-              href="/students"
-              className="px-5 py-2.5 border border-slate-200 text-sm font-medium rounded-xl hover:bg-slate-50 transition-colors text-ink"
-            >
+            <a href="/students" style={{ padding: '10px 20px', background: 'white', color: '#0B1220', border: '1px solid #E2E8F0', borderRadius: '10px', textDecoration: 'none', fontSize: '14px', fontWeight: 600 }}>
               View Students →
             </a>
           </div>
