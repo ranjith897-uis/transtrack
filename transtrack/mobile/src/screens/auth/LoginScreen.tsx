@@ -1,20 +1,47 @@
 import { useState } from 'react';
-import { View, Text, TextInput, StyleSheet, KeyboardAvoidingView, Platform, SafeAreaView } from 'react-native';
+import { View, Text, TextInput, StyleSheet, KeyboardAvoidingView, Platform, SafeAreaView, Pressable } from 'react-native';
 import { useAuthStore } from '@/lib/auth-store';
+import { api, setTokens } from '@/lib/api';
 import { Button } from '@/components/Button';
+import { User } from '@/types';
 
+/**
+ * Smart login screen — auto-detects phone vs email input.
+ *
+ * Parents (imported from Excel):
+ *   - Type their 10-digit mobile number → logs in immediately, no password
+ *   - Uses POST /auth/login/phone
+ *
+ * Drivers and admins:
+ *   - Type email → password field appears → standard login
+ *   - Uses POST /auth/login
+ */
 export function LoginScreen() {
-  const [email, setEmail] = useState('');
+  const [identifier, setIdentifier] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const login = useAuthStore((s) => s.login);
 
+  // Detect phone input: mostly digits, 8+ chars
+  const digitsOnly = identifier.replace(/\D/g, '');
+  const isPhone = digitsOnly.length >= 8 && /^[\d\s\-+()]*$/.test(identifier);
+  const needsPassword = !isPhone;
+
   async function handleLogin() {
     setError(null);
     setIsSubmitting(true);
     try {
-      await login(email.trim(), password);
+      if (isPhone) {
+        const data = await api.post<{ user: User; accessToken: string; refreshToken: string }>(
+          '/auth/login/phone',
+          { phone: identifier.trim() }
+        );
+        await setTokens(data.accessToken, data.refreshToken);
+        useAuthStore.setState({ user: data.user, isLoading: false });
+      } else {
+        await login(identifier.trim(), password);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Login failed');
     } finally {
@@ -34,34 +61,54 @@ export function LoginScreen() {
           </View>
 
           <Text style={styles.title}>Sign in</Text>
-          <Text style={styles.subtitle}>Track and manage trips in real time.</Text>
+          <Text style={styles.subtitle}>
+            {isPhone
+              ? "Enter your mobile number to track your child's bus."
+              : 'Enter your email to continue.'}
+          </Text>
 
           <View style={styles.field}>
-            <Text style={styles.label}>Email</Text>
+            <Text style={styles.label}>Mobile number or email</Text>
             <TextInput
-              value={email}
-              onChangeText={setEmail}
+              value={identifier}
+              onChangeText={setIdentifier}
               autoCapitalize="none"
               keyboardType="email-address"
               style={styles.input}
-              placeholder="you@example.com"
+              placeholder="9876543210 or you@example.com"
             />
           </View>
 
-          <View style={styles.field}>
-            <Text style={styles.label}>Password</Text>
-            <TextInput
-              value={password}
-              onChangeText={setPassword}
-              secureTextEntry
-              style={styles.input}
-              placeholder="••••••••"
-            />
-          </View>
+          {needsPassword && identifier.length > 0 && (
+            <View style={styles.field}>
+              <Text style={styles.label}>Password</Text>
+              <TextInput
+                value={password}
+                onChangeText={setPassword}
+                secureTextEntry
+                style={styles.input}
+                placeholder="••••••••"
+              />
+            </View>
+          )}
+
+          {isPhone && (
+            <View style={styles.hintBox}>
+              <Text style={styles.hintText}>
+                📱 Parent login — your mobile number is your password
+              </Text>
+            </View>
+          )}
 
           {error && <Text style={styles.error}>{error}</Text>}
 
-          <Button label="Sign in" onPress={handleLogin} loading={isSubmitting} style={styles.button} />
+          <Button
+            label={isSubmitting ? 'Signing in…' : 'Sign in'}
+            onPress={handleLogin}
+            loading={isSubmitting}
+            disabled={!identifier || (needsPassword && !password)}
+            style={styles.button}
+          />
         </View>
       </KeyboardAvoidingView>
     </SafeAreaView>
@@ -89,6 +136,8 @@ const styles = StyleSheet.create({
     fontSize: 15,
     color: '#0B1220',
   },
+  hintBox: { backgroundColor: '#EFF6FF', borderRadius: 10, padding: 12, marginBottom: 16 },
+  hintText: { fontSize: 13, color: '#2563EB' },
   error: { color: '#DC2626', fontSize: 13, marginBottom: 12 },
   button: { marginTop: 8 },
 });

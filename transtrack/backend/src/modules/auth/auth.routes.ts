@@ -38,6 +38,58 @@ authRouter.post('/login', asyncHandler(async (req, res) => {
   res.json({ user: safeUser, accessToken, refreshToken });
 }));
 
+/**
+ * Phone-number login for parents.
+ *
+ * Parents imported from Excel are created with their phone number as both
+ * their identifier and their password (stored hashed, same as any other
+ * password — the security tradeoff is documented in DEPLOYMENT.md).
+ *
+ * The mobile app's parent login screen calls this endpoint instead of
+ * /auth/login so parents just type their number — no email needed.
+ *
+ * Upgrade path: when you want to add a PIN, add a `pin_hash` column to
+ * users and check it here alongside the phone lookup — the structure
+ * already supports it without any data migration.
+ */
+const phoneLoginSchema = z.object({
+  phone: z.string().min(8),
+});
+
+authRouter.post('/login/phone', asyncHandler(async (req, res) => {
+  const { phone } = phoneLoginSchema.parse(req.body);
+
+  // Normalize: strip spaces, dashes, leading zeros — so "91 98765 43210"
+  // and "9876543210" and "+919876543210" all match the same record.
+  const normalized = phone.replace(/[\s\-()]/g, '').replace(/^\+?91/, '');
+
+  const user = await queryOne<User & { password_hash: string }>(
+    `SELECT * FROM users
+     WHERE REPLACE(REPLACE(phone, ' ', ''), '-', '') LIKE $1
+       AND role = 'PARENT'
+       AND is_active = true
+     LIMIT 1`,
+    [`%${normalized}`]
+  );
+
+  if (!user) {
+    throw new ApiError(401, 'No parent account found with this number. Contact your school transport admin.');
+  }
+
+  // The password was set to the phone number itself during import.
+  const valid = await verifyPassword(normalized, user.password_hash);
+  if (!valid) {
+    throw new ApiError(401, 'Login failed. Please contact your transport admin.');
+  }
+
+  const payload = { userId: user.id, organizationId: user.organization_id, role: user.role };
+  const accessToken = signAccessToken(payload);
+  const refreshToken = signRefreshToken(payload);
+
+  const { password_hash, ...safeUser } = user;
+  res.json({ user: safeUser, accessToken, refreshToken });
+}));
+
 const refreshSchema = z.object({
   refreshToken: z.string(),
 });

@@ -14,6 +14,8 @@ import { studentsRouter } from '@/modules/students/students.routes';
 import { tripsRouter } from '@/modules/trips/trips.routes';
 import { trackingRouter } from '@/modules/tracking/tracking.routes';
 import { notificationsRouter } from '@/modules/notifications/notifications.routes';
+import { startTeltonikaServer } from '@/modules/tracking/teltonika-server';
+import { importRouter } from '@/modules/import/import.routes';
 
 async function main() {
   await connectRedis();
@@ -47,6 +49,7 @@ async function main() {
   app.use('/trips', tripsRouter);
   app.use('/tracking', trackingRouter);
   app.use('/notifications', notificationsRouter);
+  app.use('/import', importRouter);
 
   app.use(errorHandler);
 
@@ -57,6 +60,13 @@ async function main() {
     console.log(`[server] TransTrack backend listening on :${config.port} (${config.env})`);
     console.log(`[server] WebSocket available at ws://localhost:${config.port}/ws`);
   });
+
+  // Only start the GPS hardware TCP listener if explicitly enabled — Render's
+  // standard web service plan doesn't expose raw TCP ports, so this stays
+  // off until deployed on infrastructure that supports it (see DEPLOYMENT.md).
+  if (process.env.ENABLE_TELTONIKA_TCP === 'true') {
+    startTeltonikaServer();
+  }
 }
 
 main().catch((err) => {
